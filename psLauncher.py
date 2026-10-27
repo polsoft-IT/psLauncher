@@ -7,8 +7,8 @@
 ╠══════════════════════════════════════════════════════════════════════╣
 ║  Author   : Sebastian Januchowski                                    ║
 ║  Company  : polsoft.ITS™ Group                                       ║
-║  Email    : polsoft.its@fastservice.com                              ║
-║  GitHub   : https://github.com/seb07uk                               ║
+║  Email    : polsoft.its@mail.com                                     ║
+║  GitHub   : https://github.com/polsoft-it                            ║
 ║  License  : 2026© Sebastian Januchowski & polsoft.ITS™               ║
 ║             All rights reserved.                                     ║
 ╚══════════════════════════════════════════════════════════════════════╝
@@ -119,6 +119,9 @@ TRANSLATIONS = {
         "title": "psLauncher – Uniwersalny Uruchamiacz Skryptów",
         "menu_file": "Plik",
         "menu_add_script": "Dodaj skrypt…          Ctrl+O",
+        "menu_clear_scripts": "Wyczyść listę skryptów",
+        "clear_scripts_confirm": "Usunąć wszystkie skrypty z listy? ({count})",
+        "clear_scripts_done": "Wyczyszczono listę skryptów: {count}",
         "menu_add_from_template": "Nowy z szablonu…",
         "menu_scan_dir": "Skanuj katalog…         Ctrl+S",
         "menu_exit": "Zakończ                  Ctrl+W",
@@ -721,6 +724,9 @@ TRANSLATIONS = {
         "title": "psLauncher – Universal Script Launcher",
         "menu_file": "File",
         "menu_add_script": "Add script…              Ctrl+O",
+        "menu_clear_scripts": "Clear script list",
+        "clear_scripts_confirm": "Remove all scripts from the list? ({count})",
+        "clear_scripts_done": "Cleared scripts from list: {count}",
         "menu_add_from_template": "New from template…",
         "menu_scan_dir": "Scan directory…          Ctrl+S",
         "menu_exit": "Exit                      Ctrl+W",
@@ -3486,6 +3492,10 @@ class PSLauncher(_BaseApp):
             self._ansi_enabled = self.app_settings.get("ansi_colors_enabled", True)
             self.var_ansi_colors_enabled.set(self._ansi_enabled)
 
+        # restore persisted tree sort state
+        self._sort_col = self.app_settings.get("sort_col") or None
+        self._sort_reverse = bool(self.app_settings.get("sort_reverse", False))
+
         # migrate old entries without new fields
         for s in self.scripts:
             s.setdefault("group", "")
@@ -3808,13 +3818,14 @@ class PSLauncher(_BaseApp):
 
         self.tree = ttk.Treeview(frm_tree, columns=("icon", "name", "type", "runs", "avg", "last_rc", "path"),
                                   show="headings", selectmode="browse")
+        saved_w = self.app_settings.get("col_widths", {})
         self.tree.column("icon",    width=28,  stretch=False)
-        self.tree.column("name",    width=160, stretch=False)
-        self.tree.column("type",    width=90,  stretch=False)
-        self.tree.column("runs",    width=46,  stretch=False, anchor="center")
-        self.tree.column("avg",     width=52,  stretch=False, anchor="center")
-        self.tree.column("last_rc", width=36,  stretch=False, anchor="center")
-        self.tree.column("path",    width=240, stretch=False)
+        self.tree.column("name",    width=saved_w.get("name", 160), stretch=False)
+        self.tree.column("type",    width=saved_w.get("type", 90), stretch=False)
+        self.tree.column("runs",    width=saved_w.get("runs", 46), stretch=False, anchor="center")
+        self.tree.column("avg",     width=saved_w.get("avg", 52), stretch=False, anchor="center")
+        self.tree.column("last_rc", width=saved_w.get("last_rc", 36), stretch=False, anchor="center")
+        self.tree.column("path",    width=saved_w.get("path", 240), stretch=False)
 
         vsb = ttk.Scrollbar(frm_tree, orient="vertical", command=self.tree.yview, style="Vertical.TScrollbar")
         hsb = ttk.Scrollbar(frm_tree, orient="horizontal", command=self.tree.xview, style="Horizontal.TScrollbar")
@@ -3830,6 +3841,11 @@ class PSLauncher(_BaseApp):
         self.tree.bind("<B1-Motion>", self._on_tree_drag_motion, add="+")
         self.tree.bind("<ButtonRelease-1>", self._on_tree_drag_end, add="+")
         self._drag_iid = None
+        # Persist column widths when the user resizes them
+        for col in ("name", "type", "runs", "avg", "last_rc", "path"):
+            self.tree.column(col, stretch=False)
+        self.tree.bind("<ButtonRelease-1>", self._save_col_widths, add="+")
+        self.tree.bind("<B1-Motion>", self._save_col_widths, add="+")
 
         # Action buttons
         frm_btns = tk.Frame(self.frm_left, bg=C["bg_panel"], pady=4)
@@ -4018,6 +4034,7 @@ class PSLauncher(_BaseApp):
         self.menu_file.add_command(label=T["menu_add_script"],  command=self._add_script)
         self.menu_file.add_command(label=T.get("menu_add_from_template", "New from template…"), command=self._create_from_template)
         self.menu_file.add_command(label=T["menu_scan_dir"],    command=self._open_scan_dialog)
+        self.menu_file.add_command(label=T["menu_clear_scripts"], command=self._clear_scripts)
         self.menu_file.add_separator()
         self.menu_file.add_command(label=T.get("config_export", "Export configuration…"), command=self._export_config)
         self.menu_file.add_command(label=T.get("config_import", "Import configuration…"), command=self._import_config)
@@ -4167,9 +4184,12 @@ class PSLauncher(_BaseApp):
                           command=lambda: self._sort_by("type"))
         self.tree.heading("path", text=T["col_path"],
                           command=lambda: self._sort_by("path"))
-        self.tree.heading("runs",    text=T.get("col_runs",    "Runs"))
-        self.tree.heading("avg",     text=T.get("col_avg",     "Avg"))
-        self.tree.heading("last_rc", text=T.get("col_last_rc", "RC"))
+        self.tree.heading("runs",    text=T.get("col_runs",    "Runs"),
+                          command=lambda: self._sort_by("runs"))
+        self.tree.heading("avg",     text=T.get("col_avg",     "Avg"),
+                          command=lambda: self._sort_by("avg"))
+        self.tree.heading("last_rc", text=T.get("col_last_rc", "RC"),
+                          command=lambda: self._sort_by("last_rc"))
 
         # Buttons
         self.btn_run.config(text=T["btn_run"])
@@ -4429,7 +4449,10 @@ class PSLauncher(_BaseApp):
             
             # Advanced search filters
             if filters["text"]:
-                if filters["text"] not in s.get("name", "").lower() and filters["text"] not in s.get("path", "").lower():
+                haystack = " ".join((
+                    s.get("name", ""), s.get("path", ""),
+                    s.get("tags", ""), s.get("note", ""))).lower()
+                if filters["text"] not in haystack:
                     continue
             
             if filters["type"]:
@@ -4476,9 +4499,24 @@ class PSLauncher(_BaseApp):
                          i, s.get("pinned", False)))
 
         # Pinned entries always first, then sort
-        col_idx = {"name": 1, "type": 2, "path": 3}.get(self._sort_col)
+        col_idx = {"name": 1, "type": 2, "path": 3,
+                   "runs": 4, "avg": 5, "last_rc": 6}.get(self._sort_col)
         if col_idx is not None:
-            rows.sort(key=lambda r: (not r[8], r[col_idx].lower()), reverse=self._sort_reverse)
+            if self._sort_col in ("runs", "avg", "last_rc"):
+                # numeric columns: "—" means no data -> sort last (asc) / first (desc)
+                def _num(v):
+                    if v == "—":
+                        return float("inf") if not self._sort_reverse else float("-inf")
+                    if self._sort_col == "last_rc":
+                        # "✓" -> 0, "✘N" -> N, so failures sort after successes
+                        return 0 if v == "✓" else -1 if v == "—" else 1000 + int(v.lstrip("✘") or 0)
+                    try:
+                        return float(v)
+                    except ValueError:
+                        return 0.0
+                rows.sort(key=lambda r: (not r[8], _num(r[col_idx])), reverse=self._sort_reverse)
+            else:
+                rows.sort(key=lambda r: (not r[8], str(r[col_idx]).lower()), reverse=self._sort_reverse)
             if self._sort_reverse:
                 pinned_rows = [r for r in rows if r[8]]
                 other_rows  = [r for r in rows if not r[8]]
@@ -4499,7 +4537,9 @@ class PSLauncher(_BaseApp):
         self.tree.tag_configure("odd",  background=C["tree_odd"])
 
         # Update sort indicator on headings
-        col_labels = {"name": T["col_name"], "type": T["col_type"], "path": T["col_path"]}
+        col_labels = {"name": T["col_name"], "type": T["col_type"], "path": T["col_path"],
+                      "runs": T.get("col_runs", "Runs"), "avg": T.get("col_avg", "Avg"),
+                      "last_rc": T.get("col_last_rc", "RC")}
         for col, base_lbl in col_labels.items():
             if col == self._sort_col:
                 arrow = " ▲" if not self._sort_reverse else " ▼"
@@ -4617,7 +4657,24 @@ class PSLauncher(_BaseApp):
         else:
             self._sort_col = col
             self._sort_reverse = False
+        # persist sort state
+        self.app_settings["sort_col"] = self._sort_col or ""
+        self.app_settings["sort_reverse"] = self._sort_reverse
+        self._schedule_save()
         self._refresh_tree()
+
+    def _save_col_widths(self, event=None):
+        """Persist treeview column widths (debounced)."""
+        # ignore events on the icon column drag area, and only react to
+        # separator clicks (column resize) — cheap identify check
+        if self.tree.identify_region(event.x, event.y) not in ("separator", "cell"):
+            return
+        widths = {c: self.tree.column(c, "width") for c in ("name", "type", "runs", "avg", "last_rc", "path")}
+        if getattr(self, "_col_widths_saved", None) == widths:
+            return
+        self._col_widths_saved = widths
+        self.app_settings["col_widths"] = widths
+        self._schedule_save()
 
     # ── CONTEXT MENU ────────────────────────
     def _show_context_menu(self, event):
@@ -5439,6 +5496,23 @@ set "VERSION=1.0.0"
         del self.scripts[idx]
         self._refresh_tree()
         self._schedule_save()
+
+    def _clear_scripts(self):
+        if not self.scripts:
+            return
+        T = TRANSLATIONS[self.lang]
+        count = len(self.scripts)
+        if not messagebox.askyesno(
+                T["menu_clear_scripts"],
+                T["clear_scripts_confirm"].format(count=count)):
+            return
+        self.scripts.clear()
+        self._hotkey_mgr.reload(self.scripts)
+        self._refresh_tree()
+        for _, value_label in self.meta_labels.values():
+            value_label.config(text=T["panel_meta_none"])
+        self._schedule_save()
+        self._set_status(T["clear_scripts_done"].format(count=count))
 
     # ── OPTIONS ─────────────────────────────
     def _edit_options(self):
