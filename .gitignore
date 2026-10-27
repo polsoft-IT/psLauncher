@@ -3,3 +3,4 @@
 REPO_MAP.md
 .aider/
 /__pycache__
+/dist
